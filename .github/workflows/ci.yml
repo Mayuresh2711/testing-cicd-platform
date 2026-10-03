@@ -2,9 +2,15 @@ name: Java CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master, main-secondary ]
+    branches:
+      - main
+      - master
+      - main-secondary
   pull_request:
-    branches: [ main, master, main-secondary ]
+    branches:
+      - main
+      - master
+      - main-secondary
   workflow_dispatch:
 
 permissions:
@@ -17,13 +23,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build & Test
+  build-test-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      - name: Checkout repository
+      - name: Checkout source code
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -33,46 +37,56 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Build and package JAR
-        run: ./gradlew bootJar -x test
+      - name: Initialize CodeQL Analysis
+        uses: github/codeql-action/init@v3
+        with:
+          languages: java-kotlin
+          build-mode: none
 
-      - name: Run unit tests
-        run: mvn test || true
+      - name: Build project artifacts
+        run: ./gradlew build -x test
 
-      - name: Upload Executable JAR Artifact
+      - name: Run automated tests
+        run: ./gradlew test
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        continue-on-error: true
+
+      - name: Upload Application JAR Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: backend-jar
+          name: application-jar
           path: "**/build/libs/*.jar"
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Verify JAR artifact exists
-        run: ls -la target/*.jar
-
       - name: Create Dockerfile if not present
         run: |
           if [ ! -f Dockerfile ]; then
-          cat > Dockerfile << 'DEOF'
+            cat > Dockerfile << 'DEOF'
           FROM eclipse-temurin:17-jre-jammy
           WORKDIR /app
-          COPY target/*.jar app.jar
+          COPY build/libs/*.jar app.jar
           EXPOSE 8080
           ENTRYPOINT ["java", "-jar", "app.jar"]
           DEOF
           fi
 
+      - name: Verify JAR artifact exists
+        run: ls -la build/libs/*.jar
+
       - name: Lowercase image name for GHCR
         run: echo "IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      - name: Login to GitHub Container Registry
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image to GHCR
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -81,3 +95,7 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest
+
+      - name: Deploy application
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: echo "Deploying application to target environment"
